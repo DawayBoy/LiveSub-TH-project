@@ -1,0 +1,66 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Download Vosk English model (offline speech recognition)
+        run: |
+          mkdir -p app/src/main/assets
+          cd app/src/main/assets
+          curl -L -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+          unzip -q model.zip
+          rm model.zip
+          mv vosk-model-small-en-us-0.15 model-en-us
+          uuidgen > model-en-us/uuid
+          ls -la model-en-us
+
+      - name: Signing key (ใช้ไฟล์ใน repo ถ้ามี ไม่งั้นสร้างชั่วคราว)
+        run: |
+          if [ ! -f app/livesub.keystore ]; then
+            echo "::warning::ไม่มี app/livesub.keystore — ใช้กุญแจชั่วคราว"
+            keytool -genkeypair -keystore app/livesub.keystore -alias livesub -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass livesub123 -keypass livesub123 -dname "CN=LiveSub, O=Personal, C=TH"
+          fi
+
+      - name: Build
+        run: gradle --no-daemon assembleRelease
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk out/LiveSub-TH.apk
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiveSub-TH-apk
+          path: out/LiveSub-TH.apk
+
+      - name: Publish to Releases (latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest out/LiveSub-TH.apk \
+            --title "LiveSub TH (build ${{ github.run_number }})" \
+            --notes "ดาวน์โหลด LiveSub-TH.apk แล้วติดตั้งบนมือถือ"
