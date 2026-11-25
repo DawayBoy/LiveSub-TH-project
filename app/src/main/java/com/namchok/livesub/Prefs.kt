@@ -52,6 +52,9 @@ object Prefs {
         get() = sp.getString("glossary", "") ?: ""
         set(v) = sp.edit().putString("glossary", v).apply()
 
+    /** แปลคำหยาบตรงตัว ไม่เซ็นเซอร์ */
+    var uncensored: Boolean get() = b("uncensored", true); set(v) = setB("uncensored", v)
+
     /** โหมดคุณภาพสูงผ่านเน็ต (Gemini free tier) */
     var gemini: Boolean get() = b("gemini", false); set(v) = setB("gemini", v)
     var geminiKey: String

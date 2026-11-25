@@ -80,6 +80,12 @@ class GeminiTranslator(private val apiKey: String) {
             append("You translate English video speech into natural, concise Thai subtitles. ")
             append("The English comes from automatic speech recognition: it is lowercase, has no punctuation, and may contain small mistakes — infer the intended meaning. ")
             append("Reply with ONLY the Thai subtitle text, one line, nothing else.\n")
+            if (Prefs.uncensored) {
+                append("Translate faithfully, like a professional film subtitler for an adult audience. ")
+                append("Keep profanity, insults, slang and vulgar language at the SAME strength in Thai ")
+                append("(e.g. fuck -> เหี้ย/แม่ง, shit -> ฉิบหาย, asshole -> ไอ้สารเลว). ")
+                append("Never soften, censor, omit, or use asterisks.\n")
+            }
             if (hint.isNotBlank()) append("Required terminology: ").append(hint).append('\n')
             if (context.isNotEmpty()) append("Previous lines (for context, do not translate): ")
                 .append(context.joinToString(" / ")).append('\n')
@@ -88,6 +94,15 @@ class GeminiTranslator(private val apiKey: String) {
         val body = JSONObject()
             .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
             .put("generationConfig", JSONObject().put("temperature", 0.2).put("maxOutputTokens", 256))
+        if (Prefs.uncensored) {
+            // ปิดตัวกรองของ Gemini (ไม่งั้นประโยคที่มีคำหยาบอาจถูกบล็อกทั้งประโยค)
+            val safety = JSONArray()
+            listOf("HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT").forEach {
+                safety.put(JSONObject().put("category", it).put("threshold", "BLOCK_NONE"))
+            }
+            body.put("safetySettings", safety)
+        }
         val json = http("POST", "$base/models/$model:generateContent?key=$apiKey", body.toString()) ?: return null
         val text = JSONObject(json).optJSONArray("candidates")?.optJSONObject(0)
             ?.optJSONObject("content")?.optJSONArray("parts")?.optJSONObject(0)?.optString("text")

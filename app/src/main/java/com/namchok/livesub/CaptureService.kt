@@ -424,7 +424,7 @@ class CaptureService : Service() {
     private fun upgradeWithGemini(line: Line, context: List<String>) {
         val g = gemini ?: return
         if (!g.canSend()) return
-        g.translate(Glossary.applyInput(line.en), context, Glossary.hintText()) { better ->
+        g.translate(Glossary.applyInput(line.en, builtin = false), context, Glossary.hintText()) { better ->
             if (better.isNullOrBlank()) return@translate
             val fixed = Glossary.applyOutput(better)
             line.th = fixed

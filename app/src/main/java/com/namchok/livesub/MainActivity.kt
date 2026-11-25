@@ -148,6 +148,9 @@ class MainActivity : Activity() {
         col.addView(switch("🔊 อ่านซับไทยออกเสียง (ใช้เสียงอ่านในเครื่อง ฟรี)", Prefs.tts) {
             Prefs.tts = it; refreshService()
         })
+        col.addView(switch("🤬 แปลคำหยาบตรงตัว (ไม่เซ็นเซอร์)\nปิด = ปล่อยให้ตัวแปลเลือกคำเอง (มักสุภาพลง)", Prefs.uncensored) {
+            Prefs.uncensored = it
+        })
         col.addView(button("📖 คำศัพท์กำหนดเอง (${glossaryCount()} คำ)") { b -> editGlossary(b) })
 
         // ----- ความแม่นยำ -----
