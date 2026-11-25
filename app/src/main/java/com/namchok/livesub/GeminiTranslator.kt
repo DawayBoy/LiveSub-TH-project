@@ -34,14 +34,23 @@ class GeminiTranslator(private val apiKey: String) {
         return apiKey.isNotBlank() && now >= cooldownUntil && now - lastRequest >= minIntervalMs
     }
 
-    /** แปล 1 ประโยค; cb ถูกเรียกบน main thread (null = ไม่สำเร็จ) */
-    fun translate(en: String, context: List<String>, glossaryHint: String, cb: (String?) -> Unit) {
-        if (!canSend()) { cb(null); return }
+    /** ต้องรออีกกี่ ms ถึงจะส่งได้ */
+    fun waitMs(): Long {
+        val now = SystemClock.elapsedRealtime()
+        return maxOf(cooldownUntil - now, lastRequest + minIntervalMs - now, 0L)
+    }
+
+    /**
+     * แปลหลายประโยคในคำขอเดียว (ประหยัดโควตา ไม่ทิ้งประโยคไหน)
+     * cb ถูกเรียกบน main thread: รายการผลแปลตามลำดับ (null = ประโยคนั้นไม่สำเร็จ) หรือ null ทั้งก้อน
+     */
+    fun translateBatch(lines: List<String>, context: List<String>, glossaryHint: String, cb: (List<String?>?) -> Unit) {
+        if (lines.isEmpty() || !canSend()) { cb(null); return }
         lastRequest = SystemClock.elapsedRealtime()
         io.execute {
             val result = try {
                 val model = ensureModel()
-                if (model == null) null else request(model, en, context, glossaryHint)
+                if (model == null) null else request(model, lines, context, glossaryHint)
             } catch (e: Exception) {
                 Log.w(CaptureService.TAG, "gemini", e)
                 lastError = e.message
@@ -75,25 +84,28 @@ class GeminiTranslator(private val apiKey: String) {
         return pick
     }
 
-    private fun request(model: String, en: String, context: List<String>, hint: String): String? {
+    private fun request(model: String, lines: List<String>, context: List<String>, hint: String): List<String?>? {
         val prompt = buildString {
-            append("You translate English video speech into natural, concise Thai subtitles. ")
-            append("The English comes from automatic speech recognition: it is lowercase, has no punctuation, and may contain small mistakes — infer the intended meaning. ")
-            append("Reply with ONLY the Thai subtitle text, one line, nothing else.\n")
+            append("You are a professional film/TV subtitle translator, English -> Thai.\n")
+            append("The English lines come from live speech recognition: casing and punctuation may be missing, ")
+            append("sentences may be split across lines, and a few words may be misheard. ")
+            append("Use the context to infer the intended meaning and write natural, fluent spoken Thai ")
+            append("that a Thai viewer would read in a real subtitle (not word-for-word). Keep names as names.\n")
             if (Prefs.uncensored) {
-                append("Translate faithfully, like a professional film subtitler for an adult audience. ")
-                append("Keep profanity, insults, slang and vulgar language at the SAME strength in Thai ")
-                append("(e.g. fuck -> เหี้ย/แม่ง, shit -> ฉิบหาย, asshole -> ไอ้สารเลว). ")
+                append("Translate faithfully for an adult audience: keep profanity, insults, slang and vulgar or sexual ")
+                append("language at the SAME strength in Thai (e.g. fuck -> เหี้ย/แม่ง, shit -> ฉิบหาย, asshole -> ไอ้สารเลว). ")
                 append("Never soften, censor, omit, or use asterisks.\n")
             }
             if (hint.isNotBlank()) append("Required terminology: ").append(hint).append('\n')
-            if (context.isNotEmpty()) append("Previous lines (for context, do not translate): ")
-                .append(context.joinToString(" / ")).append('\n')
-            append("Line to translate: ").append(en)
+            if (context.isNotEmpty()) append("Earlier lines (context only, do not translate):\n")
+                .append(context.joinToString("\n") { "- $it" }).append('\n')
+            append("Translate these ").append(lines.size).append(" line(s). ")
+            append("Reply with exactly ").append(lines.size).append(" line(s), each as `<number>. <Thai>`, nothing else.\n")
+            lines.forEachIndexed { i, l -> append(i + 1).append(". ").append(l).append('\n') }
         }
         val body = JSONObject()
             .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
-            .put("generationConfig", JSONObject().put("temperature", 0.2).put("maxOutputTokens", 256))
+            .put("generationConfig", JSONObject().put("temperature", 0.3).put("maxOutputTokens", 1024 + 200 * lines.size))
         if (Prefs.uncensored) {
             // ปิดตัวกรองของ Gemini (ไม่งั้นประโยคที่มีคำหยาบอาจถูกบล็อกทั้งประโยค)
             val safety = JSONArray()
@@ -104,9 +116,19 @@ class GeminiTranslator(private val apiKey: String) {
             body.put("safetySettings", safety)
         }
         val json = http("POST", "$base/models/$model:generateContent?key=$apiKey", body.toString()) ?: return null
-        val text = JSONObject(json).optJSONArray("candidates")?.optJSONObject(0)
-            ?.optJSONObject("content")?.optJSONArray("parts")?.optJSONObject(0)?.optString("text")
-        return text?.trim()?.lines()?.firstOrNull { it.isNotBlank() }?.trim()?.takeIf { it.isNotEmpty() }
+        val parts = JSONObject(json).optJSONArray("candidates")?.optJSONObject(0)
+            ?.optJSONObject("content")?.optJSONArray("parts") ?: return null
+        val text = buildString { for (i in 0 until parts.length()) append(parts.optJSONObject(i)?.optString("text") ?: "") }
+        val out = arrayOfNulls<String>(lines.size)
+        val re = Regex("""^\s*(\d+)\s*[.)\]:-]\s*(.+)$""")
+        text.lines().forEach { l ->
+            val m = re.find(l) ?: return@forEach
+            val idx = m.groupValues[1].toIntOrNull()?.minus(1) ?: return@forEach
+            if (idx in out.indices) out[idx] = m.groupValues[2].trim().trim('`').takeIf { it.isNotEmpty() }
+        }
+        // ตอบมาบรรทัดเดียวแบบไม่มีเลข (กรณีขอ 1 ประโยค)
+        if (lines.size == 1 && out[0] == null) out[0] = text.lines().firstOrNull { it.isNotBlank() }?.trim()
+        return out.toList()
     }
 
     private fun http(method: String, url: String, body: String?): String? {

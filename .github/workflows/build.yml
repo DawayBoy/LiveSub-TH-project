@@ -33,11 +33,7 @@ jobs:
           rm model.zip
           mv vosk-model-small-en-us-0.15 model-en-us
           uuidgen > model-en-us/uuid
-          ls -la model-en-us model-en-us/graph
-          echo "== คำหยาบที่โมเดลเสียงรู้จัก =="
-          for w in fuck fucking motherfucker shit bullshit bitch asshole bastard damn; do
-            if grep -q "^$w " model-en-us/graph/words.txt 2>/dev/null; then echo "$w: มี"; else echo "$w: ไม่มี"; fi
-          done
+          ls -la model-en-us
 
       # ระหว่างที่ repo ยังเป็น public: เก็บกุญแจไว้ใน cache ให้ทุก build ใช้กุญแจเดิม (ติดตั้งทับได้)
       - name: Restore signing key

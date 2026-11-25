@@ -52,6 +52,11 @@ object Prefs {
         get() = sp.getString("glossary", "") ?: ""
         set(v) = sp.edit().putString("glossary", v).apply()
 
+    /** ตัวฟังเสียง: 0 = อัตโนมัติ (Google ในเครื่องถ้ามี ไม่งั้น Vosk), 1 = Vosk เท่านั้น */
+    var engine: Int
+        get() = sp.getInt("engine", 0)
+        set(v) = sp.edit().putInt("engine", v).apply()
+
     /** แปลคำหยาบตรงตัว ไม่เซ็นเซอร์ */
     var uncensored: Boolean get() = b("uncensored", true); set(v) = setB("uncensored", v)
 

@@ -155,7 +155,19 @@ class MainActivity : Activity() {
 
         // ----- ความแม่นยำ -----
         col.addView(header("ความแม่นยำ"))
-        swLarge = switch("🎯 ใช้โมเดลฟังเสียงตัวใหญ่ (แม่นขึ้น กินแรม/แบตมากขึ้น)", Prefs.largeModel) { on ->
+        fun engineLabel(): String {
+            val gOk = GoogleAsr.isSupported(this)
+            return if (Prefs.engine == 0)
+                "🎙 ตัวฟังเสียง: อัตโนมัติ — " + (if (gOk) "ใช้ Google ในเครื่อง (แม่นสุด มีวรรคตอน)" else "เครื่องนี้ไม่มี Google แบบออฟไลน์ ใช้ Vosk")
+            else "🎙 ตัวฟังเสียง: Vosk ในแอปเท่านั้น"
+        }
+        col.addView(button(engineLabel()) { b ->
+            Prefs.engine = if (Prefs.engine == 0) 1 else 0
+            b.text = engineLabel()
+            if (CaptureService.running) Toast.makeText(this, "มีผลเมื่อเริ่มแปลรอบถัดไป", Toast.LENGTH_SHORT).show()
+        })
+        col.addView(text("ถ้า Google ใช้ไม่ได้ ให้ติดตั้ง/อัปเดต \"Speech Services by Google\" แล้วดาวน์โหลดภาษาอังกฤษแบบออฟไลน์ (ตั้งค่า → คำบรรยายสด/การจดจำเสียงพูด)", 12f, Color.LTGRAY))
+        swLarge = switch("🎯 Vosk: ใช้โมเดลตัวใหญ่ (แม่นขึ้น กินแรม/แบตมากขึ้น)", Prefs.largeModel) { on ->
             if (on && !ModelManager.isLargeReady(this)) {
                 swLarge.isChecked = false
                 Toast.makeText(this, "ดาวน์โหลดโมเดลตัวใหญ่ก่อน (ปุ่มด้านล่าง)", Toast.LENGTH_SHORT).show()

@@ -79,6 +79,12 @@ class CaptureService : Service() {
     private var translator: Translator? = null
     @Volatile private var translatorReady = false
     private var gemini: GeminiTranslator? = null
+    private val geminiQueue = mutableListOf<Line>()
+    private val recentEn = ArrayDeque<String>()       // บริบทให้ Gemini
+    private val geminiFlush = Runnable { flushGemini() }
+    private var googleAsr: GoogleAsr? = null
+    @Volatile private var useGoogle = false
+    private var engineName = "Vosk"
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var overlay: OverlayController? = null
@@ -279,10 +285,20 @@ class CaptureService : Service() {
     private fun translate(enRaw: String, cb: (String?) -> Unit) {
         val t = translator
         if (!translatorReady || t == null || enRaw.isBlank()) { cb(null); return }
-        val en = Glossary.applyInput(enRaw)
+        val en = Glossary.applyInput(tidy(enRaw))
         t.translate(en)
             .addOnSuccessListener { cb(Glossary.applyOutput(it)) }
             .addOnFailureListener { cb(null) }
+    }
+
+    /** จัดประโยคจาก Vosk (ตัวเล็กล้วน ไม่มีวรรคตอน) ให้ตัวแปลเข้าใจง่ายขึ้น */
+    private fun tidy(raw: String): String {
+        var t = raw.trim()
+        if (t.isEmpty()) return t
+        t = Regex("\\bi('(m|ll|ve|d))?\\b").replace(t) { "I" + (it.groups[1]?.value ?: "") }
+        t = t.replaceFirstChar { it.uppercaseChar() }
+        if (t.last() !in ".?!,…") t += "."
+        return t
     }
 
     // ---------------- Audio ----------------
@@ -321,7 +337,32 @@ class CaptureService : Service() {
         }
         sessionStart = SystemClock.elapsedRealtime()
         overlay?.setTexts("", "", "")
+        if (Prefs.engine == 0 && GoogleAsr.isSupported(this)) {
+            val g = GoogleAsr(this,
+                onPartial = { onPartial(it) },
+                onFinal = { onFinal(it) },
+                onFatal = { msg -> fallbackToVosk(msg) })
+            googleAsr = g
+            useGoogle = true
+            engineName = "Google"
+            g.start()
+        } else {
+            engineName = "Vosk"
+        }
+        updateNotification()
         audioThread = Thread({ audioLoop(m) }, "livesub-audio").also { it.start() }
+    }
+
+    /** ตัวฟังเสียง Google ใช้ไม่ได้ -> กลับไปใช้ Vosk */
+    private fun fallbackToVosk(msg: String) {
+        main.post {
+            if (!useGoogle) return@post
+            useGoogle = false
+            googleAsr?.stop(); googleAsr = null
+            engineName = "Vosk"
+            updateNotification()
+            toast("$msg — สลับไปใช้ตัวฟังเสียงในแอป (Vosk) แทน")
+        }
     }
 
     private fun audioLoop(m: Model) {
@@ -333,6 +374,7 @@ class CaptureService : Service() {
                 val rec = record ?: break
                 val n = rec.read(buf, 0, buf.size)
                 if (n <= 0) continue
+                if (useGoogle) { googleAsr?.feed(buf, n); continue }
                 if (recognizer.acceptWaveForm(buf, n)) {
                     val text = field(recognizer.result, "text")
                     lastPartial = ""
@@ -421,15 +463,36 @@ class CaptureService : Service() {
     }
 
     /** ส่งไป Gemini (ถ้าเปิด) แล้วแทนที่คำแปล ML Kit เมื่อได้ผลที่ดีกว่า */
-    private fun upgradeWithGemini(line: Line, context: List<String>) {
-        val g = gemini ?: return
-        if (!g.canSend()) return
-        g.translate(Glossary.applyInput(line.en, builtin = false), context, Glossary.hintText()) { better ->
-            if (better.isNullOrBlank()) return@translate
-            val fixed = Glossary.applyOutput(better)
-            line.th = fixed
-            line.entry?.th = fixed
-            if (finals.contains(line)) render()
+    private fun upgradeWithGemini(line: Line, @Suppress("UNUSED_PARAMETER") context: List<String>) {
+        if (gemini == null) return
+        geminiQueue += line
+        while (geminiQueue.size > 12) geminiQueue.removeAt(0)
+        main.removeCallbacks(geminiFlush)
+        main.post(geminiFlush)
+    }
+
+    /** รวมประโยคที่รออยู่ทั้งหมด ส่ง Gemini ทีเดียว (โควตาฟรีจำกัดจำนวนครั้งต่อนาที) */
+    private fun flushGemini() {
+        val g = gemini ?: run { geminiQueue.clear(); return }
+        if (geminiQueue.isEmpty()) return
+        if (!g.canSend()) {
+            main.removeCallbacks(geminiFlush)
+            main.postDelayed(geminiFlush, g.waitMs().coerceAtLeast(300))
+            return
+        }
+        val batch = geminiQueue.take(6)
+        geminiQueue.removeAll(batch)
+        val context = recentEn.toList()
+        batch.forEach { recentEn.addLast(it.en); while (recentEn.size > 4) recentEn.removeFirst() }
+        g.translateBatch(batch.map { Glossary.applyInput(it.en, builtin = false) }, context, Glossary.hintText()) { res ->
+            res?.forEachIndexed { i, better ->
+                if (better.isNullOrBlank() || i >= batch.size) return@forEachIndexed
+                val fixed = Glossary.applyOutput(better)
+                batch[i].th = fixed
+                batch[i].entry?.th = fixed
+            }
+            render()
+            if (geminiQueue.isNotEmpty()) { main.removeCallbacks(geminiFlush); main.postDelayed(geminiFlush, g.waitMs().coerceAtLeast(300)) }
         }
     }
 
@@ -469,7 +532,7 @@ class CaptureService : Service() {
         val openPi = PendingIntent.getActivity(
             this, 3, Intent(this, MainActivity::class.java), flags
         )
-        val mode = (if (Prefs.realtime) "โหมด Realtime" else "โหมดแม่นยำ") +
+        val mode = (if (Prefs.realtime) "โหมด Realtime" else "โหมดแม่นยำ") + " · ฟังด้วย $engineName" +
             (if (Prefs.gemini && Prefs.geminiKey.isNotBlank()) " + Gemini" else "")
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
@@ -517,6 +580,8 @@ class CaptureService : Service() {
         record?.release(); record = null
         try { projection?.stop() } catch (_: Exception) {}
         projection = null
+        googleAsr?.stop(); googleAsr = null
+        useGoogle = false
         translator?.close(); translator = null
         gemini?.close(); gemini = null
         tts?.stop(); tts?.shutdown(); tts = null
